@@ -1,0 +1,6 @@
+location,morning,lunch,afternoon,evening,night,source
+financial_district,21278,3632,2788,2775,1594,BART (Embarcadero + Montgomery St exits)
+soma,4807,1709,1666,1753,736,BART (Powell St exits)
+mission,3325,1312,2182,3215,885,BART (16th St + 24th St Mission exits)
+civic_center,5083,1012,993,1403,651,BART (Civic Center / UN Plaza exits)
+fishermans_wharf,800,2500,3000,1500,300,Assumed (no BART station; tourist area profile)

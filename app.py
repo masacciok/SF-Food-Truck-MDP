@@ -1,24 +1,23 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import pydeck as pdk
 
 # -----------------------------------
 # Page setup
 # -----------------------------------
-st.set_page_config(page_title="SF Food Truck MDP", layout="wide")
-st.title("SF Food Truck MDP Dashboard")
-st.caption(
-    "Markov Decision Process model for optimal food truck routing in San Francisco. "
-    "Adjust γ and k to see how the optimal policy changes."
-)
+st.set_page_config(page_title="SF Food Truck MDP Optimizer", layout="wide")
+st.title("SF Food Truck Routing with MDP")
+st.caption("Optimal next-step routing based on a full Markov Decision Process formulation and value iteration.")
 
 # -----------------------------------
-# Constants from model documentation
+# Constants
 # -----------------------------------
 LOCATIONS = [
-    "financial_district", "soma", "mission",
-    "fishermans_wharf", "civic_center"
+    "financial_district",
+    "soma",
+    "mission",
+    "fishermans_wharf",
+    "civic_center"
 ]
 
 TIME_ORDER = ["morning", "lunch", "afternoon", "evening", "night"]
@@ -28,30 +27,39 @@ BASE_REVENUE = {
     "soma": 13,
     "mission": 11,
     "fishermans_wharf": 15,
-    "civic_center": 11,
+    "civic_center": 11
 }
 
 TRAVEL_TIMES = {
+    ("financial_district", "financial_district"): 0,
     ("financial_district", "soma"): 5,
     ("financial_district", "mission"): 12,
     ("financial_district", "fishermans_wharf"): 15,
     ("financial_district", "civic_center"): 8,
+
     ("soma", "financial_district"): 7,
+    ("soma", "soma"): 0,
     ("soma", "mission"): 8,
     ("soma", "fishermans_wharf"): 18,
     ("soma", "civic_center"): 6,
+
     ("mission", "financial_district"): 14,
     ("mission", "soma"): 9,
+    ("mission", "mission"): 0,
     ("mission", "fishermans_wharf"): 20,
     ("mission", "civic_center"): 10,
+
     ("fishermans_wharf", "financial_district"): 12,
     ("fishermans_wharf", "soma"): 16,
     ("fishermans_wharf", "mission"): 18,
+    ("fishermans_wharf", "fishermans_wharf"): 0,
     ("fishermans_wharf", "civic_center"): 14,
+
     ("civic_center", "financial_district"): 9,
     ("civic_center", "soma"): 5,
     ("civic_center", "mission"): 8,
     ("civic_center", "fishermans_wharf"): 15,
+    ("civic_center", "civic_center"): 0
 }
 
 CONGESTION = {
@@ -59,7 +67,7 @@ CONGESTION = {
     "lunch": 1.1,
     "afternoon": 1.0,
     "evening": 1.4,
-    "night": 0.7,
+    "night": 0.7
 }
 
 LOCATION_COORDS = {
@@ -70,7 +78,7 @@ LOCATION_COORDS = {
     "civic_center": {"lat": 37.7793, "lon": -122.4192},
 }
 
-FUEL_COST_PER_MIN = 0.5
+TERMINAL_VALUE = 0.0
 
 # -----------------------------------
 # Load data
@@ -86,136 +94,249 @@ demand_df, comp_df = load_data()
 # -----------------------------------
 # Helper functions
 # -----------------------------------
-def format_location_name(name):
-    """Format location ID to display name."""
+def format_location_name(name: str) -> str:
     return name.replace("_", " ").title()
 
-def get_next_time(t):
-    idx = TIME_ORDER.index(t)
-    return TIME_ORDER[idx + 1] if idx < len(TIME_ORDER) - 1 else None
+def get_next_time_slot(current_time: str):
+    idx = TIME_ORDER.index(current_time)
+    if idx == len(TIME_ORDER) - 1:
+        return None
+    return TIME_ORDER[idx + 1]
 
-def get_demand(loc, t):
-    row = demand_df[demand_df["location"] == loc]
-    return float(row.iloc[0][t]) if not row.empty else 0
+def get_demand(location: str, time_slot: str) -> float:
+    row = demand_df[demand_df["location"] == location]
+    if row.empty:
+        return 0.0
+    return float(row.iloc[0][time_slot])
 
-def get_competition(loc, t):
-    row = comp_df[comp_df["location"] == loc]
-    return float(row.iloc[0][t]) if not row.empty else 0
+def get_competition(location: str, time_slot: str) -> float:
+    row = comp_df[comp_df["location"] == location]
+    if row.empty:
+        return 0.0
+    return float(row.iloc[0][time_slot])
 
-def compute_revenue(loc, t, k):
-    return BASE_REVENUE[loc] * get_demand(loc, t) / (1 + get_competition(loc, t) * k)
-
-def get_travel_time(from_loc, to_loc):
-    if from_loc == to_loc:
-        return 0
+def get_travel_time(from_loc: str, to_loc: str) -> float:
     return TRAVEL_TIMES.get((from_loc, to_loc), 999)
 
-def get_success_probability(from_loc, to_loc, current_time):
+def get_success_probability(from_loc: str, to_loc: str, current_time: str) -> float:
+    """
+    P_success = clamp(1 - travel_min * congestion / 60, 0.3, 0.95)
+    """
     if from_loc == to_loc:
         return 1.0
     travel_minutes = get_travel_time(from_loc, to_loc)
     effective_time = travel_minutes * CONGESTION[current_time]
-    p = 1.0 - effective_time / 60
-    p = max(0.3, min(0.95, p))
-    return p
+    p = 1.0 - effective_time / 60.0
+    return max(0.3, min(0.95, p))
+
+def compute_revenue(location: str, time_slot: str, k: float) -> float:
+    """
+    Revenue = base_revenue * demand / (1 + competition * k)
+    """
+    demand = get_demand(location, time_slot)
+    competition = get_competition(location, time_slot)
+    base = BASE_REVENUE[location]
+    return base * demand / (1 + competition * k)
+
+def get_actions(state_location: str):
+    """
+    We model actions as choosing the next destination, including staying in place.
+    So there are 5 actions per state in this project.
+    """
+    return LOCATIONS.copy()
+
+def expected_immediate_reward(current_loc: str, action_dest: str, current_time: str, k: float) -> float:
+    """
+    Reward definition based on slide:
+    Revenue = base_revenue × demand / (1 + competition × k)
+
+    If stay:
+      deterministic, time advances
+      reward = revenue_next
+
+    If move:
+      success -> Revenue - travel_cost
+      delayed -> Revenue * 0.5 - travel_cost * 1.2
+      expected reward = p * reward_success + (1-p) * reward_delayed
+    """
+    next_time = get_next_time_slot(current_time)
+    if next_time is None:
+        return 0.0
+
+    revenue_next = compute_revenue(action_dest, next_time, k)
+    travel_minutes = get_travel_time(current_loc, action_dest)
+    travel_cost = travel_minutes * 0.5
+
+    if current_loc == action_dest:
+        return revenue_next
+
+    p_success = get_success_probability(current_loc, action_dest, current_time)
+
+    reward_success = revenue_next - travel_cost
+    reward_delayed = revenue_next * 0.5 - travel_cost * 1.2
+
+    return p_success * reward_success + (1 - p_success) * reward_delayed
+
+def next_state(current_loc: str, action_dest: str, current_time: str):
+    """
+    State only includes (location, time_slot).
+    Both on-time and delayed outcomes advance to the next time slot.
+    The next location is the intended destination.
+    """
+    next_time = get_next_time_slot(current_time)
+    if next_time is None:
+        return None
+    return (action_dest, next_time)
 
 # -----------------------------------
-# MDP Solver — value iteration
+# MDP: Value Iteration
 # -----------------------------------
-def run_value_iteration(gamma, k, theta=1e-6):
+@st.cache_data
+def value_iteration(gamma: float, k: float, theta: float = 1e-6, max_iterations: int = 500):
     """
-    Value iteration solver for the food truck MDP.
-
-    Returns:
-        policy     — dict  {(loc, time): "stay" | "move_to_X", ...}
-        values     — dict  {(loc, time): float, ...}
-        q_table    — dict  {(loc, time): {action: float, ...}, ...}
-        iterations — int   number of sweeps until convergence
+    Standard Bellman optimality update:
+    V(s) = max_a [ E[R(s,a,s')] + gamma * V(s') ]
     """
+    states = [(loc, t) for loc in LOCATIONS for t in TIME_ORDER]
+    V = {s: 0.0 for s in states}
     policy = {}
-    q_table = {}
-    values = {(loc, t): 0.0 for loc in LOCATIONS for t in TIME_ORDER}
 
-    def get_actions(loc):
-        actions = ["stay"]
-        for dest in LOCATIONS:
-            if dest != loc:
-                actions.append(f"move_to_{dest}")
-        return actions
+    for _ in range(max_iterations):
+        delta = 0.0
+        new_V = V.copy()
 
-    iterations = 0
+        for loc, t in states:
+            next_t = get_next_time_slot(t)
 
-    while True:
-        delta = 0
-        new_values = values.copy()
+            # Night is the final decision step; after that -> terminal
+            if next_t is None:
+                new_V[(loc, t)] = TERMINAL_VALUE
+                policy[(loc, t)] = None
+                continue
 
-        for loc in LOCATIONS:
-            for t in TIME_ORDER:
-                state = (loc, t)
-                next_t = get_next_time(t)
-                if next_t is None:  # Terminal state at night
-                    new_values[state] = 0
-                    policy[state] = "stay"
-                    q_table[state] = {"stay": 0}
-                    continue
+            best_action = None
+            best_value = float("-inf")
 
-                best_q = float("-inf")
-                best_action = None
-                q_table[state] = {}
+            for action_dest in get_actions(loc):
+                immediate = expected_immediate_reward(loc, action_dest, t, k)
+                s_prime = next_state(loc, action_dest, t)
 
-                for action in get_actions(loc):
-                    if action == "stay":
-                        dest = loc
-                        travel_time = 0
-                    else:
-                        dest = action.replace("move_to_", "")
-                        travel_time = TRAVEL_TIMES.get((loc, dest), 0)
+                if s_prime is None:
+                    total = immediate
+                else:
+                    total = immediate + gamma * V[s_prime]
 
-                    revenue = compute_revenue(dest, next_t, k)
-                    travel_cost = travel_time * FUEL_COST_PER_MIN
-                    reward = revenue - travel_cost
+                if total > best_value:
+                    best_value = total
+                    best_action = action_dest
 
-                    # Bellman update — stay is deterministic, move is stochastic
-                    if action == "stay":
-                        q_value = reward + gamma * values[(dest, next_t)]
-                    else:
-                        p = get_success_probability(loc, dest, t)  # Probability of reaching dest
-                        q_value = (
-                            p * (reward + gamma * values[(dest, next_t)])
-                            + (1 - p) * (revenue * 0.5 - travel_cost * 1.2 + gamma * values[(loc, next_t)])
-                        )
+            new_V[(loc, t)] = best_value
+            policy[(loc, t)] = best_action
+            delta = max(delta, abs(new_V[(loc, t)] - V[(loc, t)]))
 
-                    q_table[state][action] = q_value
-
-                    if q_value > best_q:
-                        best_q = q_value
-                        best_action = action
-
-                new_values[state] = best_q
-                policy[state] = best_action
-
-                delta = max(delta, abs(values[state] - best_q))
-
-        values = new_values
-        iterations += 1
-
+        V = new_V
         if delta < theta:
             break
 
-    return policy, values, q_table, iterations
+    return V, policy
+
+def build_q_table(current_loc: str, current_time: str, V: dict, gamma: float, k: float) -> pd.DataFrame:
+    rows = []
+    next_t = get_next_time_slot(current_time)
+
+    if next_t is None:
+        return pd.DataFrame()
+
+    for action_dest in LOCATIONS:
+        immediate = expected_immediate_reward(current_loc, action_dest, current_time, k)
+        future = V[(action_dest, next_t)]
+        q_value = immediate + gamma * future
+        rows.append({
+            "action_destination": action_dest,
+            "next_time_slot": next_t,
+            "immediate_reward": round(immediate, 2),
+            "future_value": round(future, 2),
+            "q_value": round(q_value, 2),
+            "travel_minutes": get_travel_time(current_loc, action_dest),
+            "p_success": round(get_success_probability(current_loc, action_dest, current_time), 3)
+        })
+
+    return pd.DataFrame(rows).sort_values(by="q_value", ascending=False)
+
+def build_policy_table(policy: dict, V: dict) -> pd.DataFrame:
+    rows = []
+    for t in TIME_ORDER:
+        for loc in LOCATIONS:
+            rows.append({
+                "time_slot": t.title(),
+                "location": format_location_name(loc),
+                "optimal_action": "Terminal" if policy[(loc, t)] is None else format_location_name(policy[(loc, t)]),
+                "state_value": round(V[(loc, t)], 2)
+            })
+    return pd.DataFrame(rows)
+
+def rollout_policy(start_loc: str, start_time: str, policy: dict) -> pd.DataFrame:
+    """
+    Roll out the optimal policy from current state until terminal.
+    """
+    rows = []
+    current_loc = start_loc
+    current_time = start_time
+
+    while True:
+        action = policy.get((current_loc, current_time))
+        next_t = get_next_time_slot(current_time)
+
+        rows.append({
+            "current_time": current_time.title(),
+            "current_location": format_location_name(current_loc),
+            "optimal_next_action": "Terminal" if action is None else format_location_name(action),
+            "next_time": "Terminal" if next_t is None else next_t.title()
+        })
+
+        if action is None or next_t is None:
+            break
+
+        current_loc = action
+        current_time = next_t
+
+    return pd.DataFrame(rows)
+
+def build_all_locations_df():
+    rows = []
+    for loc, coords in LOCATION_COORDS.items():
+        rows.append({
+            "location": format_location_name(loc),
+            "lat": coords["lat"],
+            "lon": coords["lon"]
+        })
+    return pd.DataFrame(rows)
+
+def build_route_df(current_loc: str, best_dest: str) -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "route_label": f"{format_location_name(current_loc)} → {format_location_name(best_dest)}",
+            "start_lat": LOCATION_COORDS[current_loc]["lat"],
+            "start_lon": LOCATION_COORDS[current_loc]["lon"],
+            "end_lat": LOCATION_COORDS[best_dest]["lat"],
+            "end_lon": LOCATION_COORDS[best_dest]["lon"],
+        }
+    ])
 
 # -----------------------------------
-# Sidebar — Parameters
+# Sidebar inputs
 # -----------------------------------
-st.sidebar.header("⚙️ MDP Parameters")
+st.sidebar.header("MDP Inputs")
+
+current_location = st.sidebar.selectbox("Current Location", LOCATIONS)
+current_time = st.sidebar.selectbox("Current Time Slot", TIME_ORDER)
 
 gamma = st.sidebar.slider(
     "Discount Factor (γ)",
-    min_value=0.1,
+    min_value=0.50,
     max_value=0.99,
     value=0.90,
-    step=0.01,
-    help="Low γ → short-sighted (cares about next slot). High γ → plans across the full day.",
+    step=0.01
 )
 
 k_value = st.sidebar.slider(
@@ -223,214 +344,154 @@ k_value = st.sidebar.slider(
     min_value=0.05,
     max_value=0.30,
     value=0.15,
-    step=0.05,
-    help="Low k → ignores competition, chases demand. High k → avoids crowded areas.",
+    step=0.05
 )
 
-st.sidebar.divider()
-
-# FIX 1: Moved selectboxes to sidebar (were incorrectly in main body in Doc 6)
-st.sidebar.header("🔍 State Inspector")
-current_location = st.sidebar.selectbox("Location", LOCATIONS, format_func=format_location_name)
-current_time = st.sidebar.selectbox("Time Slot", TIME_ORDER)
+st.sidebar.success("Decision Mode: Optimal Policy (MDP)")
 
 # -----------------------------------
-# Run MDP
+# Top visual annotations
 # -----------------------------------
-policy, values, q_table, iterations = run_value_iteration(gamma, k_value)
+st.subheader("MDP Decision Timeline")
+t1, t2, t3, t4, t5, t6 = st.columns(6)
 
-# ===================================================================
-# Section 1: Optimal Policy Table
-# ===================================================================
-st.subheader("Optimal Policy π(s)")
-st.caption(
-    "Each cell shows the best action for that (location, time) state. "
-    "Adjust γ and k in the sidebar to see the policy change."
-)
+with t1:
+    st.info("Morning")
+with t2:
+    st.info("Lunch")
+with t3:
+    st.info("Afternoon")
+with t4:
+    st.info("Evening")
+with t5:
+    st.info("Night")
+with t6:
+    st.error("Terminal")
 
-policy_data = []
-for loc in LOCATIONS:
-    row = {"Location": format_location_name(loc)}
-    for t in TIME_ORDER:
-        row[t.title()] = policy.get((loc, t), "—")
-    policy_data.append(row)
+st.caption("State = (location, time_slot). After Night, the process transitions to the terminal state.")
 
-policy_table = pd.DataFrame(policy_data).set_index("Location")
-st.dataframe(policy_table, use_container_width=True)
+st.subheader("Current State Snapshot")
+s1, s2, s3, s4 = st.columns(4)
 
-if iterations > 0:
-    st.caption(f"Converged in **{iterations}** iterations (θ = 1e-6)")
+# Solve MDP
+V, policy = value_iteration(gamma=gamma, k=k_value)
+
+state_value = V[(current_location, current_time)]
+optimal_action = policy[(current_location, current_time)]
+next_time = get_next_time_slot(current_time)
+
+with s1:
+    st.metric("Current Location", format_location_name(current_location))
+with s2:
+    st.metric("Current Time", current_time.title())
+with s3:
+    st.metric("Discount γ", f"{gamma:.2f}")
+with s4:
+    st.metric("State Value V(s)", f"{state_value:,.2f}")
+
+# -----------------------------------
+# Main output
+# -----------------------------------
+if optimal_action is None or next_time is None:
+    st.warning("This is the final decision step. After Night, the system transitions to the terminal state.")
 else:
-    st.info("⚠️ Value iteration not yet implemented. Policy table will populate once the solver is connected.")
+    q_df = build_q_table(current_location, current_time, V, gamma, k_value)
+    best_row = q_df.iloc[0]
 
-# ===================================================================
-# Section 2: State Value V(s) Heatmap
-# ===================================================================
-st.subheader("State Values V(s)")
-st.caption("Darker color = higher value. Shows expected total reward from each state onward.")
+    st.subheader("Optimal MDP Recommendation")
+    r1, r2, r3, r4 = st.columns(4)
 
-value_data = []
-for loc in LOCATIONS:
-    row = {"Location": format_location_name(loc)}
-    for t in TIME_ORDER:
-        # FIX 2: Store as float, not str — color_cells needs numeric values for intensity calculation
-        row[t.title()] = round(values.get((loc, t), 0), 2)
-    value_data.append(row)
+    with r1:
+        st.metric("Optimal Next Destination", format_location_name(optimal_action))
+    with r2:
+        st.metric("Q*(s,a)", f"{best_row['q_value']:,.2f}")
+    with r3:
+        st.metric("Next Time Slot", next_time.title())
+    with r4:
+        st.metric("Travel Time (min)", int(best_row["travel_minutes"]))
 
-value_df = pd.DataFrame(value_data).set_index("Location")
+    st.caption(
+        f"Optimal policy recommends: **{format_location_name(current_location)} → {format_location_name(optimal_action)}**"
+    )
 
-def color_cells(val):
-    try:
-        val = float(val)
-    except:
-        return ""
-    if val == 0:
-        return "background-color: #f0f0f0; color: #999"
-    max_val = value_df.values.max() if value_df.values.max() > 0 else 1
-    intensity = val / max_val
-    r = int(255 * (1 - intensity))
-    g = int(180 + 75 * (1 - intensity))
-    b = int(100 + 155 * (1 - intensity))
-    return f"background-color: rgb({r},{g},{b}); color: #222; font-weight: bold"
+    # ---------- visuals first ----------
+    vcol1, vcol2 = st.columns([1.2, 1])
 
-styled_values = value_df.style.map(color_cells)
-st.dataframe(styled_values, use_container_width=True)
+    with vcol1:
+        st.subheader("Action Q-Value Visualization")
+        chart_df = q_df[["action_destination", "q_value"]].copy()
+        chart_df["action_destination"] = chart_df["action_destination"].apply(format_location_name)
+        chart_df = chart_df.set_index("action_destination")
+        st.bar_chart(chart_df)
+        st.caption("Each bar shows the total expected return Q(s,a) = immediate reward + γ × future value.")
 
-# ===================================================================
-# Section 3: Route Map
-# ===================================================================
-st.subheader("Route Map")
+    with vcol2:
+        st.subheader("Action Breakdown")
+        display_q_df = q_df.copy()
+        display_q_df["action_destination"] = display_q_df["action_destination"].apply(format_location_name)
+        display_q_df["immediate_reward"] = display_q_df["immediate_reward"].map(lambda x: f"{x:,.2f}")
+        display_q_df["future_value"] = display_q_df["future_value"].map(lambda x: f"{x:,.2f}")
+        display_q_df["q_value"] = display_q_df["q_value"].map(lambda x: f"{x:,.2f}")
+        st.dataframe(display_q_df, use_container_width=True, hide_index=True)
+        st.caption("The optimal action is the one with the highest Q-value.")
 
-sel_action = policy.get((current_location, current_time), "—")
-sel_dest = None
+    # ---------- route map ----------
+    st.subheader("Optimal Route Visualization")
 
-if sel_action.startswith("move_to_"):
-    sel_dest = sel_action.replace("move_to_", "")
-elif sel_action == "stay":
-    sel_dest = current_location
+    all_locations_df = build_all_locations_df()
+    route_df = build_route_df(current_location, optimal_action)
 
-all_loc_df = pd.DataFrame([
-    {"location": format_location_name(loc), "lat": c["lat"], "lon": c["lon"]}
-    for loc, c in LOCATION_COORDS.items()
-])
+    view_state = pdk.ViewState(
+        latitude=37.785,
+        longitude=-122.410,
+        zoom=11,
+        pitch=0,
+    )
 
-layers = [
-    pdk.Layer(
+    scatter_layer = pdk.Layer(
         "ScatterplotLayer",
-        data=all_loc_df,
-        get_position="[lon, lat]",
+        data=all_locations_df,
+        get_position='[lon, lat]',
         get_radius=250,
-        get_fill_color="[80, 130, 255, 160]",
+        get_fill_color='[80, 130, 255, 160]',
         pickable=True,
     )
-]
 
-if sel_dest and sel_dest != current_location and sel_dest in LOCATION_COORDS:
-    route_df = pd.DataFrame([{
-        "route_label": f"{format_location_name(current_location)} → {format_location_name(sel_dest)}",
-        "start_lat": LOCATION_COORDS[current_location]["lat"],
-        "start_lon": LOCATION_COORDS[current_location]["lon"],
-        "end_lat": LOCATION_COORDS[sel_dest]["lat"],
-        "end_lon": LOCATION_COORDS[sel_dest]["lon"],
-    }])
-    layers.append(pdk.Layer(
+    line_layer = pdk.Layer(
         "LineLayer",
         data=route_df,
-        get_source_position="[start_lon, start_lat]",
-        get_target_position="[end_lon, end_lat]",
+        get_source_position='[start_lon, start_lat]',
+        get_target_position='[end_lon, end_lat]',
         get_width=6,
-        get_color="[255, 99, 71]",
+        get_color='[255, 99, 71]',
         pickable=True,
-    ))
-
-deck = pdk.Deck(
-    layers=layers,
-    initial_view_state=pdk.ViewState(
-        latitude=37.785, longitude=-122.410, zoom=11.5, pitch=0,
-    ),
-    tooltip={"text": "{location}"},
-)
-st.pydeck_chart(deck, use_container_width=True)
-st.caption(
-    f"Selected state: **{format_location_name(current_location)}** @ **{current_time.title()}** → "
-    f"Optimal action: **{sel_action}**"
-)
-
-# ===================================================================
-# Section 4: Q-Value Breakdown (selected state)
-# ===================================================================
-st.subheader("Q-Values for Selected State")
-st.caption(
-    f"All action values at ({format_location_name(current_location)}, {current_time.title()}). "
-    f"The highest Q-value determines the optimal action."
-)
-
-q_for_state = q_table.get((current_location, current_time), {})
-if q_for_state:
-    q_rows = []
-    for action, q_val in sorted(q_for_state.items(), key=lambda x: -x[1]):
-        q_rows.append({"Action": action, "Q(s, a)": round(q_val, 2)})
-    q_df = pd.DataFrame(q_rows)
-    st.dataframe(q_df, use_container_width=True, hide_index=True)
-else:
-    st.info("Q-values will appear here once the solver is implemented.")
-
-# ===================================================================
-# Section 5: Revenue Breakdown (selected state)
-# ===================================================================
-st.subheader("Revenue Breakdown")
-
-next_t = get_next_time(current_time)
-if next_t is None:
-    st.warning("Night is the terminal time slot — no further transitions.")
-else:
-    rev_rows = []
-    for loc in LOCATIONS:
-        d = get_demand(loc, next_t)
-        c = get_competition(loc, next_t)
-        base = BASE_REVENUE[loc]
-        denom = 1 + c * k_value
-        rev = base * d / denom
-        travel = TRAVEL_TIMES.get((current_location, loc), 0) if loc != current_location else 0
-        travel_cost = travel * FUEL_COST_PER_MIN
-
-        rev_rows.append({
-            "Destination": format_location_name(loc),
-            "Base ($)": base,
-            "Demand": int(d),
-            "Competition": int(c),
-            f"1 + comp × {k_value:.2f}": round(denom, 2),
-            "Revenue ($)": f"{rev:,.1f}",
-            "Travel (min)": travel,
-            "Travel Cost ($)": f"{travel_cost:.1f}",
-        })
-
-    rev_df = pd.DataFrame(rev_rows)
-    st.dataframe(rev_df, use_container_width=True, hide_index=True)
-    st.caption(
-        f"Revenue at each destination in the **{next_t.title()}** slot.  "
-        f"Formula: base × demand / (1 + competition × k)"
     )
 
-# ===================================================================
-# Section 6: Input Data — Demand & Competition
-# ===================================================================
-st.subheader("Input Data")
+    deck = pdk.Deck(
+        layers=[scatter_layer, line_layer],
+        initial_view_state=view_state,
+        tooltip={"text": "{route_label}"}
+    )
 
-data_col1, data_col2 = st.columns(2)
+    st.pydeck_chart(deck)
+    st.caption("Blue points are candidate locations. The red line shows the optimal next action under the MDP policy.")
 
-with data_col1:
-    st.markdown("**Demand Matrix** (BART exits)")
-    disp_demand = demand_df[["location"] + TIME_ORDER].copy()
-    disp_demand["location"] = disp_demand["location"].apply(format_location_name)
-    disp_demand = disp_demand.rename(columns={"location": "Location"})
-    disp_demand.columns = ["Location"] + [t.title() for t in TIME_ORDER]
-    st.dataframe(disp_demand.set_index("Location"), use_container_width=True)
+    # ---------- rollout ----------
+    st.subheader("Optimal Policy Rollout (Until Terminal)")
+    rollout_df = rollout_policy(current_location, current_time, policy)
+    st.dataframe(rollout_df, use_container_width=True, hide_index=True)
+    st.caption("This shows how the optimal policy would continue over the rest of the day.")
 
-with data_col2:
-    st.markdown("**Competition Matrix** (active trucks)")
-    disp_comp = comp_df[["location"] + TIME_ORDER].copy()
-    disp_comp["location"] = disp_comp["location"].apply(format_location_name)
-    disp_comp = disp_comp.rename(columns={"location": "Location"})
-    disp_comp.columns = ["Location"] + [t.title() for t in TIME_ORDER]
-    st.dataframe(disp_comp.set_index("Location"), use_container_width=True)
+    # ---------- policy table ----------
+    st.subheader("Optimal Policy Table")
+    policy_df = build_policy_table(policy, V)
+    st.dataframe(policy_df, use_container_width=True, hide_index=True)
+
+    # ---------- final summary ----------
+    st.subheader("Final Recommendation")
+    st.success(
+        f"Under the MDP optimal policy, the food truck should move from "
+        f"**{format_location_name(current_location)}** to "
+        f"**{format_location_name(optimal_action)}** "
+        f"in the next time slot (**{next_time.title()}**)."
+    )
